@@ -1,0 +1,670 @@
+from __future__ import annotations
+
+from math import comb
+from typing import Literal
+
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+DATA_PATH = "wingspan_game.csv"
+
+EXPANSION_LABELS = {
+    "originalcore": "Original",
+    "european": "European",
+    "oceania": "Oceania",
+    "asia": "Asia",
+    "americas": "Americas",
+    "swiftstart": "Swift",
+}
+
+HABITAT_COLUMNS = ["Forest", "Grassland", "Wetland"]
+FOOD_COLUMNS = [
+    "Invertebrate",
+    "Seed",
+    "Fish",
+    "Fruit",
+    "Rodent",
+    "Nectar",
+    "Wild (food)",
+]
+MARKER_COLUMNS = ["Predator", "Flocking", "Bonus card"]
+BONUS_CARD_COLUMNS = [
+    "Anatomist",
+    "Cartographer",
+    "Historian",
+    "Photographer",
+    "Backyard Birder",
+    "Bird Bander",
+    "Bird Counter",
+    "Bird Feeder",
+    "Diet Specialist",
+    "Enclosure Builder",
+    "Falconer",
+    "Fishery Manager",
+    "Food Web Expert",
+    "Forester",
+    "Large Bird Specialist",
+    "Nest Box Builder",
+    "Omnivore Expert",
+    "Passerine Specialist",
+    "Platform Builder",
+    "Prairie Manager",
+    "Rodentologist",
+    "Viticulturalist",
+    "Wetland Scientist",
+    "Wildlife Gardener",
+    "Caprimulgiform Specialist",
+    "Small Clutch Specialist",
+    "Endangered Species Protector",
+    "Beak Pointing Left",
+    "Beak Pointing Right",
+]
+
+DISPLAY_COLUMNS = [
+    "Common name",
+    "Expansion",
+    "Victory points",
+    "Total food cost",
+    "Nest type",
+    "Color",
+    "PowerCategory",
+    "Forest",
+    "Grassland",
+    "Wetland",
+]
+
+# Each Wingspan die has 6 equally likely faces; the wild face counts as invertebrate or seed.
+DIE_FACE_OPTIONS: list[frozenset[str]] = [
+    frozenset({"Fish"}),
+    frozenset({"Rodent"}),
+    frozenset({"Fruit"}),
+    frozenset({"Invertebrate"}),
+    frozenset({"Seed"}),
+    frozenset({"Invertebrate", "Seed"}),
+]
+DICE_FOODS = ["Invertebrate", "Seed", "Fish", "Fruit", "Rodent"]
+
+
+@st.cache_data
+def load_birds(path: str = DATA_PATH) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df["Expansion"] = df["Expansion"].astype(str)
+    return df
+
+
+def is_marked(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.upper().eq("X")
+
+
+def prob_at_least_one(total: int, matching: int, draws: int) -> float:
+    if draws <= 0 or matching <= 0:
+        return 0.0
+    if draws >= total:
+        return 1.0
+    if total - matching < draws:
+        return 1.0
+    return 1.0 - comb(total - matching, draws) / comb(total, draws)
+
+
+def expected_matches(total: int, matching: int, draws: int) -> float:
+    if total <= 0 or draws <= 0:
+        return 0.0
+    return draws * matching / total
+
+
+def render_tri_state_filter(
+    label: str,
+    key: str,
+) -> Literal["any", "yes", "no"]:
+    return st.selectbox(
+        label,
+        options=["Any", "Yes", "No"],
+        index=0,
+        key=key,
+    ).lower()
+
+
+def apply_marker_filter(
+    df: pd.DataFrame,
+    column: str,
+    choice: Literal["any", "yes", "no"],
+) -> pd.DataFrame:
+    if choice == "any":
+        return df
+    marked = is_marked(df[column])
+    return df[marked] if choice == "yes" else df[~marked]
+
+
+def apply_habitat_filter(
+    df: pd.DataFrame,
+    habitats: list[str],
+    mode: Literal["any", "all"],
+) -> pd.DataFrame:
+    if not habitats:
+        return df
+
+    masks = [is_marked(df[habitat]) for habitat in habitats]
+    if mode == "all":
+        combined = masks[0]
+        for mask in masks[1:]:
+            combined &= mask
+    else:
+        combined = masks[0]
+        for mask in masks[1:]:
+            combined |= mask
+    return df[combined]
+
+
+def apply_bonus_filter(df: pd.DataFrame, selected_bonus: list[str]) -> pd.DataFrame:
+    if not selected_bonus:
+        return df
+
+    mask = pd.Series(False, index=df.index)
+    for column in selected_bonus:
+        mask |= is_marked(df[column])
+    return df[mask]
+
+
+def apply_food_filter(
+    df: pd.DataFrame,
+    selected_food: list[str],
+    min_cost: int | None,
+) -> pd.DataFrame:
+    filtered = df
+    if selected_food:
+        mask = pd.Series(False, index=df.index)
+        for column in selected_food:
+            mask |= pd.to_numeric(df[column], errors="coerce").fillna(0).gt(0)
+        filtered = filtered[mask]
+    if min_cost is not None:
+        filtered = filtered[pd.to_numeric(filtered["Total food cost"], errors="coerce") >= min_cost]
+    return filtered
+
+
+def format_pct(value: float) -> str:
+    return f"{100 * value:.1f}%"
+
+
+def build_victory_points_chart(deck: pd.DataFrame, filtered: pd.DataFrame) -> alt.Chart:
+    matching_ids = set(filtered.index)
+    rows: list[dict[str, object]] = []
+
+    for vp, group in deck.groupby("Victory points", sort=True):
+        total = len(group)
+        matching = int(group.index.isin(matching_ids).sum())
+        non_matching = total - matching
+        pct_matching = 100 * matching / total if total else 0.0
+        pct_label = f"{pct_matching:.0f}%"
+
+        rows.append(
+            {
+                "Victory points": str(int(vp)),
+                "Category": "Matching",
+                "Count": matching,
+                "pct_label": pct_label,
+                "stack_total": total,
+            }
+        )
+        rows.append(
+            {
+                "Victory points": str(int(vp)),
+                "Category": "Non-matching",
+                "Count": non_matching,
+                "pct_label": pct_label,
+                "stack_total": total,
+            }
+        )
+
+    chart_df = pd.DataFrame(rows)
+
+    bars = alt.Chart(chart_df).mark_bar().encode(
+        x=alt.X("Victory points:O", title="Victory points", sort=None),
+        y=alt.Y("Count:Q", stack="zero", title="Birds"),
+        color=alt.Color(
+            "Category:N",
+            title=None,
+            scale=alt.Scale(
+                domain=["Matching", "Non-matching"],
+                range=["#27ae60", "#bdc3c7"],
+            ),
+        ),
+        order=alt.Order("Category", sort="ascending"),
+        tooltip=[
+            alt.Tooltip("Victory points:O", title="Victory points"),
+            alt.Tooltip("Category:N", title="Category"),
+            alt.Tooltip("Count:Q", title="Birds"),
+        ],
+    )
+
+    segment_labels = (
+        alt.Chart(chart_df)
+        .transform_filter(alt.datum.Count > 0)
+        .transform_stack(
+            as_=["y0", "y1"],
+            stack="Count",
+            groupby=["Victory points"],
+            sort=[alt.SortField("Category", order="ascending")],
+        )
+        .transform_calculate(label_y="(datum.y0 + datum.y1) / 2")
+        .mark_text(baseline="middle", color="white", fontSize=16, fontWeight="bold")
+        .encode(
+            x=alt.X("Victory points:O", axis=alt.Axis(titleFontSize=16, labelFontSize=14)),
+            y=alt.Y("label_y:Q", axis=alt.Axis(titleFontSize=16, labelFontSize=14)),
+            text=alt.Text("Count:Q"),
+            detail="Category:N",
+        )
+   
+    )
+
+    pct_labels = (
+        alt.Chart(chart_df.drop_duplicates("Victory points"))
+        .mark_text(dy=-10, fontSize=16, fontWeight="bold", color="#2c3e50")
+        .encode(
+            x="Victory points:O",
+            y=alt.Y("stack_total:Q"),
+            text="pct_label:N",
+        )
+    )
+
+    return (bars + segment_labels + pct_labels).properties(height=340)
+
+
+def prob_die_shows_food(selected_foods: set[str]) -> float:
+    if not selected_foods:
+        return 0.0
+    matching_faces = sum(1 for face in DIE_FACE_OPTIONS if face & selected_foods)
+    return matching_faces / len(DIE_FACE_OPTIONS)
+
+
+def prob_binomial_at_least(k: int, n: int, p: float) -> float:
+    if k <= 0:
+        return 1.0
+    if n <= 0 or p <= 0:
+        return 0.0
+    if k > n:
+        return 0.0
+    return sum(
+        comb(n, i) * (p**i) * ((1 - p) ** (n - i))
+        for i in range(k, n + 1)
+    )
+
+
+def prob_at_least_one_roll_succeeds(p_per_roll: float, num_rolls: int) -> float:
+    if num_rolls <= 0:
+        return 0.0
+    if p_per_roll >= 1:
+        return 1.0
+    if p_per_roll <= 0:
+        return 0.0
+    return 1 - (1 - p_per_roll) ** num_rolls
+
+
+def build_dice_match_chart(n_dice: int, p_die: float) -> alt.Chart:
+    rows = []
+    for matches in range(n_dice + 1):
+        prob = comb(n_dice, matches) * (p_die**matches) * ((1 - p_die) ** (n_dice - matches))
+        rows.append({"Matching dice": str(matches), "Probability": prob})
+
+    chart_df = pd.DataFrame(rows)
+    return (
+        alt.Chart(chart_df)
+        .mark_bar(color="#3498db")
+        .encode(
+            x=alt.X("Matching dice:O", title="Matching dice on one roll", sort=None),
+            y=alt.Y("Probability:Q", axis=alt.Axis(format="%"), title="Probability"),
+            tooltip=[
+                alt.Tooltip("Matching dice:O", title="Matching dice"),
+                alt.Tooltip("Probability:Q", title="Probability", format=".1%"),
+            ],
+        )
+        .properties(height=280)
+    )
+
+
+def render_dice_tab() -> None:
+    st.subheader("Food dice probability")
+    st.caption(
+        "Uses standard Wingspan dice: each die has fish, rodent, fruit, invertebrate, "
+        "seed, and one wild invertebrate/seed face. Dice are treated as independent."
+    )
+
+    left, right = st.columns([1, 1])
+
+    with left:
+        selected_foods = st.multiselect(
+            "Food required",
+            options=DICE_FOODS,
+            default=["Rodent"],
+            help="A die counts as a match if it shows any selected food. "
+            "The wild face counts for invertebrate or seed.",
+        )
+        dice_per_roll = st.number_input(
+            "Dice rolled per attempt",
+            min_value=1,
+            max_value=5,
+            value=2,
+            help="Hunting powers roll dice not currently in the birdfeeder (usually 1-4).",
+        )
+        num_rolls = st.number_input(
+            "Number of roll attempts",
+            min_value=1,
+            max_value=10,
+            value=1,
+            help="Independent attempts; overall success if at least one attempt succeeds.",
+        )
+        min_matches = st.number_input(
+            "Minimum matching dice per attempt",
+            min_value=1,
+            max_value=int(dice_per_roll),
+            value=1,
+            help="How many dice must show the required food on a single roll.",
+        )
+
+    if not selected_foods:
+        st.warning("Select at least one food type.")
+        return
+
+    p_die = prob_die_shows_food(set(selected_foods))
+    p_per_roll = prob_binomial_at_least(min_matches, int(dice_per_roll), p_die)
+    p_overall = prob_at_least_one_roll_succeeds(p_per_roll, int(num_rolls))
+
+    with right:
+        st.markdown("**Per-die odds**")
+        face_rows = []
+        for food in DICE_FOODS:
+            face_rows.append(
+                {
+                    "Food": food,
+                    "P(single die)": prob_die_shows_food({food}),
+                }
+            )
+        face_df = pd.DataFrame(face_rows)
+        face_df["P(single die)"] = face_df["P(single die)"].map(format_pct)
+        st.dataframe(face_df, hide_index=True, use_container_width=True)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("P(one die shows required food)", format_pct(p_die))
+    m2.metric(
+        f"P(≥{min_matches} match on {dice_per_roll} dice)",
+        format_pct(p_per_roll),
+    )
+    m3.metric(
+        f"P(success in ≤{num_rolls} attempts)",
+        format_pct(p_overall),
+    )
+    m4.metric(
+        f"P(all {num_rolls} attempts fail)",
+        format_pct(1 - p_overall),
+    )
+
+    st.caption(
+        f"Selected foods ({', '.join(selected_foods)}) match "
+        f"{int(p_die * len(DIE_FACE_OPTIONS))} of {len(DIE_FACE_OPTIONS)} faces on each die."
+    )
+
+    st.subheader("Matching dice on one roll")
+    st.altair_chart(
+        build_dice_match_chart(int(dice_per_roll), p_die),
+        use_container_width=True,
+    )
+
+
+def render_draw_tab(birds: pd.DataFrame, all_expansions: list[str]) -> None:
+    with st.sidebar:
+        st.header("Expansions")
+        selected_expansions = []
+        for expansion in all_expansions:
+            label = EXPANSION_LABELS.get(expansion, expansion.title())
+            default_on = expansion != "swiftstart"
+            if st.checkbox(label, value=default_on, key=f"exp_{expansion}"):
+                selected_expansions.append(expansion)
+
+        st.divider()
+        st.header("Card attributes")
+
+        vp_min, vp_max = st.slider(
+            "Victory points",
+            min_value=0,
+            max_value=int(birds["Victory points"].max()),
+            value=(0, int(birds["Victory points"].max())),
+        )
+        food_min, food_max = st.slider(
+            "Total food cost",
+            min_value=0,
+            max_value=int(birds["Total food cost"].max()),
+            value=(0, int(birds["Total food cost"].max())),
+        )
+
+        power_categories = sorted(
+            birds["PowerCategory"].dropna().astype(str).unique().tolist()
+        )
+        selected_power = st.multiselect(
+            "Power category",
+            options=power_categories,
+            default=[],
+        )
+        no_power_only = st.checkbox("No power only", value=False)
+
+        nest_types = sorted(birds["Nest type"].dropna().astype(str).unique().tolist())
+        selected_nests = st.multiselect("Nest type", options=nest_types, default=[])
+
+        colors = sorted(birds["Color"].dropna().astype(str).unique().tolist())
+        selected_colors = st.multiselect("Power color", options=colors, default=[])
+
+        st.subheader("Habitat")
+        selected_habitats = st.multiselect(
+            "Has habitat",
+            options=HABITAT_COLUMNS,
+            default=[],
+        )
+        habitat_mode = st.radio(
+            "Habitat match mode",
+            options=["Any selected", "All selected"],
+            horizontal=True,
+        )
+
+        st.subheader("Traits")
+        predator = render_tri_state_filter("Predator", "predator")
+        flocking = render_tri_state_filter("Flocking", "flocking")
+        bonus_card = render_tri_state_filter("Bonus card icon", "bonus_card")
+
+        st.subheader("Food requirements")
+        selected_food = st.multiselect(
+            "Requires food type",
+            options=FOOD_COLUMNS,
+            default=[],
+        )
+        requires_wild = st.checkbox("Requires wild food token", value=False)
+        alternate_cost = render_tri_state_filter("Alternate food cost (/)", "slash_cost")
+        wild_cost = render_tri_state_filter("Any-food cost (*)", "star_cost")
+
+        st.subheader("Bonus card tags")
+        selected_bonus = st.multiselect(
+            "Matches bonus card",
+            options=BONUS_CARD_COLUMNS,
+            default=[],
+        )
+        bonus_mode = st.radio(
+            "Bonus tag match mode",
+            options=["Any selected tag", "All selected tags"],
+            horizontal=True,
+        )
+
+    if not selected_expansions:
+        st.warning("Select at least one expansion in the sidebar.")
+        return
+
+    deck = birds[birds["Expansion"].isin(selected_expansions)].copy()
+    filtered = deck.copy()
+
+    filtered = filtered[
+        filtered["Victory points"].between(vp_min, vp_max, inclusive="both")
+    ]
+    filtered = filtered[
+        filtered["Total food cost"].between(food_min, food_max, inclusive="both")
+    ]
+
+    if selected_power:
+        filtered = filtered[filtered["PowerCategory"].isin(selected_power)]
+    if no_power_only:
+        filtered = filtered[filtered["PowerCategory"].isna() | (filtered["PowerCategory"] == "")]
+
+    if selected_nests:
+        filtered = filtered[filtered["Nest type"].isin(selected_nests)]
+    if selected_colors:
+        filtered = filtered[filtered["Color"].isin(selected_colors)]
+
+    if selected_habitats:
+        mode = "all" if habitat_mode == "All selected" else "any"
+        filtered = apply_habitat_filter(filtered, selected_habitats, mode)
+
+    for column, choice in [
+        ("Predator", predator),
+        ("Flocking", flocking),
+        ("Bonus card", bonus_card),
+    ]:
+        filtered = apply_marker_filter(filtered, column, choice)
+
+    if selected_food or requires_wild:
+        food_cols = list(selected_food)
+        if requires_wild and "Wild (food)" not in food_cols:
+            food_cols.append("Wild (food)")
+        filtered = apply_food_filter(filtered, food_cols, min_cost=None)
+
+    filtered = apply_marker_filter(filtered, "/ (food cost)", alternate_cost)
+    filtered = apply_marker_filter(filtered, "* (food cost)", wild_cost)
+
+    if selected_bonus:
+        if bonus_mode == "All selected tags":
+            for column in selected_bonus:
+                filtered = apply_marker_filter(filtered, column, "yes")
+        else:
+            filtered = apply_bonus_filter(filtered, selected_bonus)
+
+    total_cards = len(deck)
+    matching_cards = len(filtered)
+    single_draw_prob = matching_cards / total_cards if total_cards else 0.0
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Birds in deck", total_cards)
+    col2.metric("Matching birds", matching_cards)
+    col3.metric("P(one random draw)", format_pct(single_draw_prob))
+    col4.metric(
+        "Share of deck",
+        format_pct(single_draw_prob),
+        help="Same as single-draw probability when drawing uniformly at random.",
+    )
+
+    st.subheader("Multi-card draws")
+    draw_count = st.slider(
+        "Bird cards drawn",
+        min_value=1,
+        max_value=min(5, total_cards) if total_cards else 1,
+        value=2,
+        help="Wingspan's draw action usually gives 2 cards from the deck or tray.",
+    )
+
+    at_least_one = prob_at_least_one(total_cards, matching_cards, draw_count)
+    expected = expected_matches(total_cards, matching_cards, draw_count)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric(f"P(at least 1 match in {draw_count})", format_pct(at_least_one))
+    m2.metric(f"P(no matches in {draw_count})", format_pct(1 - at_least_one))
+    m3.metric(f"Expected matches in {draw_count}", f"{expected:.2f}")
+
+    st.caption(
+        "Multi-card probabilities assume sampling without replacement from the full bird deck."
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+        st.subheader("Victory points in deck")
+        st.caption(
+            "Stacked bars show matching vs non-matching birds at each VP. "
+            "Labels show counts per segment; percentages are matching share of that VP total."
+        )
+        st.altair_chart(build_victory_points_chart(deck, filtered), use_container_width=True)
+
+    with right:
+        st.subheader("Matching birds by expansion")
+        if matching_cards:
+            expansion_counts = (
+                filtered["Expansion"]
+                .map(lambda x: EXPANSION_LABELS.get(x, x))
+                .value_counts()
+                .rename("Matching birds")
+                .to_frame()
+                .reset_index()
+                .rename(columns={"index": "Expansion"})
+            )
+            bar = alt.Chart(expansion_counts).mark_bar(color="#6c8ebf").encode(
+                x=alt.X(
+                    "Expansion:N", 
+                    title="Expansion", 
+                    axis=alt.Axis(
+                        labelFontSize=14, 
+                        titleFontSize=16, 
+                        labelAngle=-45
+                    )
+                ),
+                y=alt.Y(
+                    "Matching birds:Q", 
+                    title="Matching birds",
+                    axis=alt.Axis(
+                        labelFontSize=14, 
+                        titleFontSize=16
+                    )
+                ),
+                tooltip=[alt.Tooltip("Expansion:N", title="Expansion"), alt.Tooltip("Matching birds:Q", title="Matching birds")]
+            ).properties(height=320)
+            st.altair_chart(bar, use_container_width=True)
+       
+        else:
+            st.info("No birds match the current filters.")
+
+    st.subheader("Matching birds")
+    if matching_cards:
+        display_df = filtered[DISPLAY_COLUMNS].sort_values(
+            ["Victory points", "Common name"],
+            ascending=[False, True],
+        )
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Try relaxing filters or adding more expansions.")
+
+    with st.expander("Full deck breakdown"):
+        deck_summary = (
+            deck["Expansion"]
+            .map(lambda x: EXPANSION_LABELS.get(x, x))
+            .value_counts()
+            .rename("Birds")
+            .to_frame()
+        )
+        st.dataframe(deck_summary, use_container_width=True)
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Wingspan Calculator",
+        page_icon="🐦",
+        layout="wide",
+    )
+    st.title("Wingspan Calculator")
+    st.caption("Draw probabilities and food dice odds for the Wingspan board game.")
+
+    birds = load_birds()
+    all_expansions = sorted(birds["Expansion"].unique())
+
+    tab_draw, tab_dice = st.tabs(["Bird draws", "Food dice"])
+
+    with tab_draw:
+        render_draw_tab(birds, all_expansions)
+
+    with tab_dice:
+        render_dice_tab()
+
+
+if __name__ == "__main__":
+    main()
