@@ -498,6 +498,16 @@ def prob_at_least_one_roll_succeeds(p_per_roll: float, num_rolls: int) -> float:
     return 1 - (1 - p_per_roll) ** num_rolls
 
 
+def prob_all_rolls_succeed(p_per_roll: float, num_rolls: int) -> float:
+    if num_rolls <= 0:
+        return 0.0
+    if p_per_roll <= 0:
+        return 0.0
+    if p_per_roll >= 1:
+        return 1.0
+    return p_per_roll**num_rolls
+
+
 def build_dice_match_chart(n_dice: int, p_die: float) -> alt.Chart:
     rows = []
     for matches in range(n_dice + 1):
@@ -523,8 +533,8 @@ def build_dice_match_chart(n_dice: int, p_die: float) -> alt.Chart:
 def render_dice_tab() -> None:
     st.subheader("Food dice probability")
     st.caption(
-        "Uses standard Wingspan dice: each die has fish, rodent, fruit, invertebrate, "
-        "seed, and one wild invertebrate/seed face. Dice are treated as independent."
+        "Models standard Wingspan dice: each die has fish, rodent, fruit, invertebrate, "
+        "seed, and one wild invertebrate/seed face. Each die roll is independent."
     )
 
     left, right = st.columns([1, 1])
@@ -542,21 +552,21 @@ def render_dice_tab() -> None:
             min_value=1,
             max_value=5,
             value=2,
-            help="Hunting powers roll dice not currently in the birdfeeder (usually 1-4).",
+            help="How many dice you roll in one attempt (e.g. hunting rolls dice not in the birdfeeder).",
         )
         num_rolls = st.number_input(
             "Number of roll attempts",
             min_value=1,
             max_value=10,
             value=1,
-            help="Independent attempts; overall success if at least one attempt succeeds.",
+            help="How many separate times you roll. Attempts are independent.",
         )
         min_matches = st.number_input(
             "Minimum matching dice per attempt",
             min_value=1,
             max_value=int(dice_per_roll),
             value=1,
-            help="How many dice must show the required food on a single roll.",
+            help="An attempt succeeds if at least this many dice show the required food.",
         )
 
     if not selected_foods:
@@ -565,7 +575,9 @@ def render_dice_tab() -> None:
 
     p_die = prob_die_shows_food(set(selected_foods))
     p_per_roll = prob_binomial_at_least(min_matches, int(dice_per_roll), p_die)
-    p_overall = prob_at_least_one_roll_succeeds(p_per_roll, int(num_rolls))
+    p_at_least_one = prob_at_least_one_roll_succeeds(p_per_roll, int(num_rolls))
+    p_all_success = prob_all_rolls_succeed(p_per_roll, int(num_rolls))
+    p_all_fail = 1 - p_at_least_one
 
     with right:
         st.markdown("**Per-die odds**")
@@ -581,20 +593,71 @@ def render_dice_tab() -> None:
         face_df["P(single die)"] = face_df["P(single die)"].map(format_pct)
         st.dataframe(face_df, hide_index=True, use_container_width=True)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("P(one die shows required food)", format_pct(p_die))
+    st.markdown("**Probabilities**")
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "Single die matches",
+        format_pct(p_die),
+        help="One die lands on a face that satisfies your required food.",
+    )
     m2.metric(
-        f"P(≥{min_matches} match on {dice_per_roll} dice)",
+        f"One attempt succeeds (≥{min_matches} of {dice_per_roll} dice)",
         format_pct(p_per_roll),
+        help="You roll once and meet the minimum number of matching dice.",
     )
     m3.metric(
-        f"P(success in ≤{num_rolls} attempts)",
-        format_pct(p_overall),
+        "One attempt fails",
+        format_pct(1 - p_per_roll),
+        help="You roll once and do not meet the minimum number of matching dice.",
     )
+
+    m4, m5, m6 = st.columns(3)
     m4.metric(
-        f"P(all {num_rolls} attempts fail)",
-        format_pct(1 - p_overall),
+        f"≥1 of {num_rolls} attempts succeed",
+        format_pct(p_at_least_one),
+        help="At least one roll attempt hits your threshold. "
+        "Useful for powers that let you keep rolling until you succeed once.",
     )
+    m5.metric(
+        f"All {num_rolls} attempts succeed",
+        format_pct(p_all_success),
+        help="Every roll attempt hits your threshold. "
+        "Useful for powers that reward success on each roll.",
+    )
+    m6.metric(
+        f"All {num_rolls} attempts fail",
+        format_pct(p_all_fail),
+        help="None of your roll attempts hit your threshold.",
+    )
+
+    with st.expander("What do these probabilities mean?", expanded=True):
+        st.markdown(
+            f"""
+**Single die matches ({format_pct(p_die)})**  
+One die is rolled. This is the chance its face is a required food type.
+Invertebrate and seed each match 2 of 6 faces because of the wild face.
+
+**One attempt succeeds ({format_pct(p_per_roll)})**  
+You roll **{dice_per_roll}** dice once. The attempt succeeds if **≥{min_matches}**
+show the required food. Hunting powers like “if any are rodent” use
+**{min_matches}** match with **1** attempt.
+
+**One attempt fails ({format_pct(1 - p_per_roll)})**  
+The complement of a single attempt succeeding.
+
+**≥1 of {num_rolls} attempts succeed ({format_pct(p_at_least_one)})**  
+You get **{num_rolls}** independent tries. This is the chance **at least one**
+attempt succeeds — even if others fail. Example: roll up to 3 times and stop
+when you hit once.
+
+**All {num_rolls} attempts succeed ({format_pct(p_all_success)})**  
+Every attempt must succeed. Example: a power that caches food on **each**
+successful roll across **{num_rolls}** tries.
+
+**All {num_rolls} attempts fail ({format_pct(p_all_fail)})**  
+No attempt meets the threshold.
+"""
+        )
 
     st.caption(
         f"Selected foods ({', '.join(selected_foods)}) match "
@@ -602,6 +665,9 @@ def render_dice_tab() -> None:
     )
 
     st.subheader("Matching dice on one roll")
+    st.caption(
+        "Distribution for a single attempt: how many of the rolled dice show the required food."
+    )
     st.altair_chart(
         build_dice_match_chart(int(dice_per_roll), p_die),
         use_container_width=True,
