@@ -75,7 +75,7 @@ DISPLAY_COLUMNS = [
 ]
 
 # Each Wingspan die has 6 equally likely faces; the wild face counts as invertebrate or seed.
-DIE_FACE_OPTIONS: list[frozenset[str]] = [
+STANDARD_DIE_FACES: list[frozenset[str]] = [
     frozenset({"Fish"}),
     frozenset({"Rodent"}),
     frozenset({"Fruit"}),
@@ -83,7 +83,36 @@ DIE_FACE_OPTIONS: list[frozenset[str]] = [
     frozenset({"Seed"}),
     frozenset({"Invertebrate", "Seed"}),
 ]
-DICE_FOODS = ["Invertebrate", "Seed", "Fish", "Fruit", "Rodent"]
+# Oceania dice add nectar to the fruit and seed faces; the wild face is unchanged.
+OCEANIA_DIE_FACES: list[frozenset[str]] = [
+    frozenset({"Fish"}),
+    frozenset({"Rodent"}),
+    frozenset({"Fruit", "Nectar"}),
+    frozenset({"Invertebrate"}),
+    frozenset({"Seed", "Nectar"}),
+    frozenset({"Invertebrate", "Seed"}),
+]
+DIE_TYPES: dict[str, dict] = {
+    "standard": {
+        "label": "Standard",
+        "faces": STANDARD_DIE_FACES,
+        "foods": ["Invertebrate", "Seed", "Fish", "Fruit", "Rodent"],
+        "description": (
+            "Models standard Wingspan dice: each die has fish, rodent, fruit, invertebrate, "
+            "seed, and one wild invertebrate/seed face. Each die roll is independent."
+        ),
+    },
+    "oceania": {
+        "label": "Oceania",
+        "faces": OCEANIA_DIE_FACES,
+        "foods": ["Invertebrate", "Seed", "Fish", "Fruit", "Rodent", "Nectar"],
+        "description": (
+            "Models Oceania food dice: same six faces as standard dice, but the fruit and seed "
+            "faces also show nectar. Nectar is not wild for bird powers that require a specific "
+            "food type. Each die roll is independent."
+        ),
+    },
+}
 
 
 @st.cache_data
@@ -468,11 +497,11 @@ def build_wingspan_boxplot(deck: pd.DataFrame, filtered: pd.DataFrame) -> alt.Ch
     return (boxes + dots).properties(height=380)
 
 
-def prob_die_shows_food(selected_foods: set[str]) -> float:
+def prob_die_shows_food(selected_foods: set[str], die_faces: list[frozenset[str]]) -> float:
     if not selected_foods:
         return 0.0
-    matching_faces = sum(1 for face in DIE_FACE_OPTIONS if face & selected_foods)
-    return matching_faces / len(DIE_FACE_OPTIONS)
+    matching_faces = sum(1 for face in die_faces if face & selected_foods)
+    return matching_faces / len(die_faces)
 
 
 def prob_binomial_at_least(k: int, n: int, p: float) -> float:
@@ -532,17 +561,25 @@ def build_dice_match_chart(n_dice: int, p_die: float) -> alt.Chart:
 
 def render_dice_tab() -> None:
     st.subheader("Food dice probability")
-    st.caption(
-        "Models standard Wingspan dice: each die has fish, rodent, fruit, invertebrate, "
-        "seed, and one wild invertebrate/seed face. Each die roll is independent."
+
+    die_type = st.radio(
+        "Die type",
+        options=list(DIE_TYPES),
+        format_func=lambda key: DIE_TYPES[key]["label"],
+        horizontal=True,
     )
+    die_config = DIE_TYPES[die_type]
+    die_faces = die_config["faces"]
+    dice_foods = die_config["foods"]
+
+    st.caption(die_config["description"])
 
     left, right = st.columns([1, 1])
 
     with left:
         selected_foods = st.multiselect(
             "Food required",
-            options=DICE_FOODS,
+            options=dice_foods,
             default=["Rodent"],
             help="A die counts as a match if it shows any selected food. "
             "The wild face counts for invertebrate or seed.",
@@ -573,7 +610,7 @@ def render_dice_tab() -> None:
         st.warning("Select at least one food type.")
         return
 
-    p_die = prob_die_shows_food(set(selected_foods))
+    p_die = prob_die_shows_food(set(selected_foods), die_faces)
     p_per_roll = prob_binomial_at_least(min_matches, int(dice_per_roll), p_die)
     p_at_least_one = prob_at_least_one_roll_succeeds(p_per_roll, int(num_rolls))
     p_all_success = prob_all_rolls_succeed(p_per_roll, int(num_rolls))
@@ -582,11 +619,11 @@ def render_dice_tab() -> None:
     with right:
         st.markdown("**Per-die odds**")
         face_rows = []
-        for food in DICE_FOODS:
+        for food in dice_foods:
             face_rows.append(
                 {
                     "Food": food,
-                    "P(single die)": prob_die_shows_food({food}),
+                    "P(single die)": prob_die_shows_food({food}, die_faces),
                 }
             )
         face_df = pd.DataFrame(face_rows)
@@ -630,12 +667,19 @@ def render_dice_tab() -> None:
         help="None of your roll attempts hit your threshold.",
     )
 
+    wild_face_note = (
+        "Invertebrate and seed each match 2 of 6 faces because of the wild face."
+        if die_type == "standard"
+        else "Invertebrate and seed each match 2 of 6 faces because of the wild face. "
+        "Nectar appears on the fruit and seed faces (2 of 6)."
+    )
+
     with st.expander("What do these probabilities mean?", expanded=True):
         st.markdown(
             f"""
 **Single die matches ({format_pct(p_die)})**  
 One die is rolled. This is the chance its face is a required food type.
-Invertebrate and seed each match 2 of 6 faces because of the wild face.
+{wild_face_note}
 
 **One attempt succeeds ({format_pct(p_per_roll)})**  
 You roll **{dice_per_roll}** dice once. The attempt succeeds if **≥{min_matches}**
@@ -661,7 +705,7 @@ No attempt meets the threshold.
 
     st.caption(
         f"Selected foods ({', '.join(selected_foods)}) match "
-        f"{int(p_die * len(DIE_FACE_OPTIONS))} of {len(DIE_FACE_OPTIONS)} faces on each die."
+        f"{int(p_die * len(die_faces))} of {len(die_faces)} faces on each die."
     )
 
     st.subheader("Matching dice on one roll")
