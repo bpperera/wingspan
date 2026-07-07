@@ -182,6 +182,27 @@ def apply_food_filter(
     return filtered
 
 
+def is_unlisted_wingspan(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().eq("*")
+
+
+def apply_wingspan_filter(
+    df: pd.DataFrame,
+    ws_min: int,
+    ws_max: int,
+    unlisted: Literal["any", "yes", "no"],
+) -> pd.DataFrame:
+    numeric = pd.to_numeric(df["Wingspan"], errors="coerce")
+    in_range = numeric.between(ws_min, ws_max, inclusive="both")
+    unlisted_bird = is_unlisted_wingspan(df["Wingspan"])
+
+    if unlisted == "yes":
+        return df[unlisted_bird]
+    if unlisted == "no":
+        return df[in_range.fillna(False)]
+    return df[in_range.fillna(False) | unlisted_bird]
+
+
 def format_pct(value: float) -> str:
     return f"{100 * value:.1f}%"
 
@@ -268,6 +289,183 @@ def build_victory_points_chart(deck: pd.DataFrame, filtered: pd.DataFrame) -> al
     )
 
     return (bars + segment_labels + pct_labels).properties(height=340)
+
+
+WINGSPAN_BIN_SIZE = 25
+
+
+def wingspan_bin_label(wingspan: int, bin_size: int = WINGSPAN_BIN_SIZE) -> str:
+    bin_start = (wingspan // bin_size) * bin_size
+    return f"{bin_start}-{bin_start + bin_size - 1}"
+
+
+def deck_with_numeric_wingspan(deck: pd.DataFrame) -> pd.DataFrame:
+    numeric = pd.to_numeric(deck["Wingspan"], errors="coerce")
+    result = deck[numeric.notna()].copy()
+    result["_wingspan"] = numeric[numeric.notna()].astype(int)
+    return result
+
+
+def wingspan_bin_start(bin_label: str) -> int:
+    return int(bin_label.split("-")[0])
+
+
+def wingspan_x_encoding(bin_order: list[str]) -> alt.X:
+    return alt.X(
+        "Wingspan (cm):O",
+        title="Wingspan (cm)",
+        sort=bin_order,
+    )
+
+
+def build_wingspan_chart(
+    deck: pd.DataFrame,
+    filtered: pd.DataFrame,
+    bin_size: int = WINGSPAN_BIN_SIZE,
+) -> alt.Chart:
+    matching_ids = set(filtered.index)
+    numeric_deck = deck_with_numeric_wingspan(deck)
+    numeric_deck["_bin"] = numeric_deck["_wingspan"].map(
+        lambda ws: wingspan_bin_label(ws, bin_size)
+    )
+
+    bin_order = sorted(
+        numeric_deck["_bin"].unique(),
+        key=lambda label: int(label.split("-")[0]),
+    )
+
+    rows: list[dict[str, object]] = []
+    for bin_label in bin_order:
+        group = numeric_deck[numeric_deck["_bin"] == bin_label]
+        total = len(group)
+        matching = int(group.index.isin(matching_ids).sum())
+        non_matching = total - matching
+        pct_matching = 100 * matching / total if total else 0.0
+        pct_label = f"{pct_matching:.0f}%"
+        bin_start = wingspan_bin_start(bin_label)
+
+        rows.append(
+            {
+                "Wingspan (cm)": bin_label,
+                "bin_start": bin_start,
+                "Category": "Matching",
+                "Count": matching,
+                "pct_label": pct_label,
+                "stack_total": total,
+            }
+        )
+        rows.append(
+            {
+                "Wingspan (cm)": bin_label,
+                "bin_start": bin_start,
+                "Category": "Non-matching",
+                "Count": non_matching,
+                "pct_label": pct_label,
+                "stack_total": total,
+            }
+        )
+
+    chart_df = pd.DataFrame(rows)
+    chart_df["Wingspan (cm)"] = pd.Categorical(
+        chart_df["Wingspan (cm)"],
+        categories=bin_order,
+        ordered=True,
+    )
+
+    x_axis = wingspan_x_encoding(bin_order)
+
+    bars = alt.Chart(chart_df).mark_bar().encode(
+        x=x_axis,
+        y=alt.Y("Count:Q", stack="zero", title="Birds"),
+        color=alt.Color(
+            "Category:N",
+            title=None,
+            scale=alt.Scale(
+                domain=["Matching", "Non-matching"],
+                range=["#27ae60", "#bdc3c7"],
+            ),
+        ),
+        order=alt.Order("Category", sort="ascending"),
+        tooltip=[
+            alt.Tooltip("Wingspan (cm):O", title="Wingspan (cm)"),
+            alt.Tooltip("Category:N", title="Category"),
+            alt.Tooltip("Count:Q", title="Birds"),
+        ],
+    )
+
+    segment_labels = (
+        alt.Chart(chart_df)
+        .transform_filter(alt.datum.Count > 0)
+        .transform_stack(
+            as_=["y0", "y1"],
+            stack="Count",
+            groupby=["Wingspan (cm)"],
+            sort=[alt.SortField("Category", order="ascending")],
+        )
+        .transform_calculate(label_y="(datum.y0 + datum.y1) / 2")
+        .mark_text(baseline="middle", color="white", fontSize=14, fontWeight="bold")
+        .encode(
+            x=x_axis,
+            y="label_y:Q",
+            text=alt.Text("Count:Q"),
+            detail="Category:N",
+        )
+    )
+
+    pct_labels = (
+        alt.Chart(chart_df.drop_duplicates(subset=["Wingspan (cm)"], keep="first"))
+        .mark_text(dy=-10, fontSize=12, fontWeight="bold", color="#2c3e50")
+        .encode(
+            x=x_axis,
+            y=alt.Y("stack_total:Q"),
+            text="pct_label:N",
+        )
+    )
+
+    return (bars + segment_labels + pct_labels).properties(height=340)
+
+
+def build_wingspan_boxplot(deck: pd.DataFrame, filtered: pd.DataFrame) -> alt.Chart:
+    matching_ids = set(filtered.index)
+    points_df = deck_with_numeric_wingspan(deck).copy()
+    points_df["Category"] = points_df.index.map(
+        lambda index: "Matching" if index in matching_ids else "Non-matching"
+    )
+    points_df["Expansion label"] = points_df["Expansion"].map(
+        lambda expansion: EXPANSION_LABELS.get(str(expansion), str(expansion))
+    )
+
+    color_scale = alt.Scale(
+        domain=["Matching", "Non-matching"],
+        range=["#27ae60", "#bdc3c7"],
+    )
+    base = alt.Chart(points_df)
+
+    boxes = base.mark_boxplot(size=50, extent="min-max").encode(
+        x=alt.X("Category:N", title=None),
+        y=alt.Y("Wingspan:Q", title="Wingspan (cm)", scale=alt.Scale(zero=False)),
+        color=alt.Color("Category:N", scale=color_scale, legend=None),
+    )
+
+    dots = (
+        base.transform_calculate(jitter="(random() - 0.5) * 0.25")
+        .mark_circle(size=45, opacity=0.6)
+        .encode(
+            x=alt.X("Category:N", scale=alt.Scale(padding=0.3)),
+            xOffset=alt.XOffset("jitter:Q"),
+            y="Wingspan:Q",
+            color=alt.Color("Category:N", scale=color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("Common name:N", title="Bird"),
+                alt.Tooltip("Wingspan:Q", title="Wingspan (cm)", format=".0f"),
+                alt.Tooltip("Victory points:Q", title="Victory points", format=".0f"),
+                alt.Tooltip("Expansion label:N", title="Expansion"),
+                alt.Tooltip("Category:N", title="Filter match"),
+            ],
+        )
+    )
+
+    return (boxes + dots).properties(height=380)
 
 
 def prob_die_shows_food(selected_foods: set[str]) -> float:
@@ -416,7 +614,7 @@ def render_draw_tab(birds: pd.DataFrame, all_expansions: list[str]) -> None:
         selected_expansions = []
         for expansion in all_expansions:
             label = EXPANSION_LABELS.get(expansion, expansion.title())
-            default_on = expansion != "swiftstart"
+            default_on = True
             if st.checkbox(label, value=default_on, key=f"exp_{expansion}"):
                 selected_expansions.append(expansion)
 
@@ -434,6 +632,20 @@ def render_draw_tab(birds: pd.DataFrame, all_expansions: list[str]) -> None:
             min_value=0,
             max_value=int(birds["Total food cost"].max()),
             value=(0, int(birds["Total food cost"].max())),
+        )
+
+        numeric_wingspans = pd.to_numeric(birds["Wingspan"], errors="coerce")
+        ws_min_bound = int(numeric_wingspans.min())
+        ws_max_bound = int(numeric_wingspans.max())
+        wingspan_min, wingspan_max = st.slider(
+            "Wingspan (cm)",
+            min_value=ws_min_bound,
+            max_value=ws_max_bound,
+            value=(ws_min_bound, ws_max_bound),
+        )
+        unlisted_wingspan = render_tri_state_filter(
+            "Unlisted wingspan (*)",
+            "unlisted_wingspan",
         )
 
         power_categories = sorted(
@@ -504,6 +716,12 @@ def render_draw_tab(birds: pd.DataFrame, all_expansions: list[str]) -> None:
     filtered = filtered[
         filtered["Total food cost"].between(food_min, food_max, inclusive="both")
     ]
+    filtered = apply_wingspan_filter(
+        filtered,
+        wingspan_min,
+        wingspan_max,
+        unlisted_wingspan,
+    )
 
     if selected_power:
         filtered = filtered[filtered["PowerCategory"].isin(selected_power)]
@@ -623,6 +841,25 @@ def render_draw_tab(birds: pd.DataFrame, all_expansions: list[str]) -> None:
        
         else:
             st.info("No birds match the current filters.")
+
+    excluded_wingspan = len(deck) - len(deck_with_numeric_wingspan(deck))
+    st.subheader("Wingspan in deck")
+    st.caption(
+        "Stacked bars show matching vs non-matching birds in 25 cm wingspan bins. "
+        "Labels show counts per segment; percentages are matching share of that bin. "
+        + (
+            f"{excluded_wingspan} bird(s) with unlisted wingspan (*) are excluded."
+            if excluded_wingspan
+            else ""
+        )
+    )
+    st.altair_chart(build_wingspan_chart(deck, filtered), use_container_width=True)
+
+    st.caption(
+        "Box plot shows the full wingspan spread for matching vs non-matching birds. "
+        "Hover over dots to see individual bird names."
+    )
+    st.altair_chart(build_wingspan_boxplot(deck, filtered), use_container_width=True)
 
     st.subheader("Matching birds")
     if matching_cards:

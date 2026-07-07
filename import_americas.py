@@ -165,6 +165,12 @@ def numeric_or_empty(value: object) -> object:
     return int(value) if float(value).is_integer() else value
 
 
+def numeric_score(value: object) -> object:
+    if value in (None, ""):
+        return pd.NA
+    return int(value) if float(value).is_integer() else value
+
+
 def nest_type(value: object) -> str:
     if not value or pd.isna(value):
         return ""
@@ -198,9 +204,9 @@ def wingsearch_to_csv_row(bird: dict[str, object], columns: list[str]) -> dict[s
     row["Predator"] = mark(bird.get("Predator"))
     row["Flocking"] = mark(bird.get("Flocking"))
     row["Bonus card"] = mark(bird.get("Bonus card"))
-    row["Victory points"] = numeric_or_empty(bird.get("Victory points"))
+    row["Victory points"] = numeric_score(bird.get("Victory points"))
     row["Nest type"] = nest_type(bird.get("Nest type"))
-    row["Egg capacity"] = numeric_or_empty(bird.get("Egg limit"))
+    row["Egg capacity"] = numeric_score(bird.get("Egg limit"))
     row["Wingspan"] = numeric_or_empty(bird.get("Wingspan"))
     row["Forest"] = mark(bird.get("Forest"))
     row["Grassland"] = mark(bird.get("Grassland"))
@@ -219,7 +225,7 @@ def wingsearch_to_csv_row(bird: dict[str, object], columns: list[str]) -> dict[s
 
     row["/ (food cost)"] = mark(bird.get("/ (food cost)"))
     row["* (food cost)"] = mark(bird.get("* (food cost)"))
-    row["Total food cost"] = numeric_or_empty(bird.get("Total food cost"))
+    row["Total food cost"] = numeric_score(bird.get("Total food cost"))
 
     for bonus in BONUS_COLUMNS:
         row[bonus] = mark(bird.get(bonus))
